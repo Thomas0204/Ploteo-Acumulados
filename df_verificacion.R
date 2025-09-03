@@ -10,10 +10,10 @@ library(ggplot2)
 library(ggrepel)
 
 df <- read_csv(
-  file = "precipitacion_acumulado_2025-09-01_21-13.csv")
+  file = "datos/precipitacion_acumulado_2025-09-01_21-13.csv")
 
 df_2 <- read_csv(
-  file = "station_coordinates.csv")
+  file = "datos/station_coordinates.csv")
 
 departamentos_sf <- st_read("SHP/departamentos.shp")
 

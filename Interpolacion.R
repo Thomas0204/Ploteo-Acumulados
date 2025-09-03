@@ -11,19 +11,40 @@ library(stars)
 library(ggrepel)
 library(readr)
 library(sp)  # Añadir sp para funciones coordinates
+library(jpeg)
+library(grid)# Para agregar logo
 
 # Cargar datos
-df <- read_csv("precipitacion_acumulado_2025-09-01_21-13.csv")
-df_2 <- read_csv("station_coordinates.csv")
+df <- read_csv("datos/precipitacion_acumulado_2025-09-01_21-13.csv")
+df_2 <- read_csv("datos/station_coordinates.csv")
 df_2 <- df_2[df_2$original_id %in% df$station_code, ]
 departamentos_sf <- st_read("SHP/departamentos.shp")
 departamentos_sf <- departamentos_sf %>%
   filter(PROVINCIA == "CORDOBA")
 
+logo <- jpeg::readJPEG("Logo_ohmc.jpg")
+
+logo_grob <- rasterGrob(logo, interpolate = TRUE)
+
+
+# Coordenadas de ciudades
+ciudades <- data.frame(
+  nombre = c("Córdoba", "Villa María", "Río Cuarto", "Mina Clavero", 
+             "V.Mackenna", "Laboulaye", "Cruz del Eje", "Villa de María", 
+             "S.Francisco"),
+  longitude = c(-64.1914, -63.2438, -64.3497, -65.0044, -64.3907, 
+                -63.3885, -64.8076, -63.7234, -62.0839),
+  latitude = c(-31.4193, -32.4465, -33.1230, -31.7296, -33.9183, 
+               -34.1276, -30.7209, -29.9043, -31.4256)
+)
+
+# Convertir ciudades a sf
+ciudades_sf <- st_as_sf(ciudades, coords = c("longitude", "latitude"), crs = 4326)
 
 # Definir CRS
 utm_crs <- 32720
 departamentos_utm <- st_transform(departamentos_sf, utm_crs)
+ciudades_utm <- st_transform(ciudades_sf, utm_crs)
 
 # Normalizar IDs
 norm_id <- function(x) {
@@ -73,26 +94,30 @@ x_seq <- seq(bbox_cordoba[1], bbox_cordoba[3], by = grid_size)
 y_seq <- seq(bbox_cordoba[2], bbox_cordoba[4], by = grid_size)
 
 # Crear grilla
-
-grid <- expand.grid(x = x_seq, y = y_seq)
-coordinates(grid) <- ~x + y
-proj4string(grid) <- CRS(paste0("+init=epsg:", utm_crs))
+#grid <- expand.grid(x = x_seq, y = y_seq)
+#coordinates(grid) <- ~x + y
+#proj4string(grid) <- CRS(paste0("+init=epsg:", utm_crs))
 
 # Convertir a sf y filtrar puntos dentro de Córdoba
+#grid_sf <- st_as_sf(grid)
+#grid_points <- st_intersection(grid_sf, st_union(departamentos_utm))
 
-grid_sf <- st_as_sf(grid)
-grid_points <- st_intersection(grid_sf, st_union(departamentos_utm))
+# --- GRILLA REGULAR DE 2 km SOLO DENTRO DE CÓRDOBA (UTM)
+grid_points <- st_make_grid(departamentos_utm, cellsize = grid_size, what = "centers") %>%
+  st_as_sf() %>%
+  st_intersection(st_union(departamentos_utm))
+st_crs(grid_points) <- st_crs(departamentos_utm)
 
+# Para gstat:
+grid_sp <- as(grid_points, "Spatial")
 # PREPARAR DATOS PARA GSTAT
 #---------------------------
 # Convertir df_Acumulados a formato sp (requerido por gstat)
-
 df_sp <- as(df_Acumulados_utm, "Spatial")
 
 # ANÁLISIS EXPLORATORIO DE DATOS
 #--------------------------------
 # Verificar distribución de datos
-
 summary(df_Acumulados$accumulated_rain_mm)
 hist(df_Acumulados$accumulated_rain_mm, 
      main = "Distribución de Precipitación Acumulada",
@@ -101,7 +126,6 @@ hist(df_Acumulados$accumulated_rain_mm,
 # VARIOGRAMA
 #------------
 # Calcular variograma experimental
-
 v_exp <- variogram(accumulated_rain_mm ~ 1, df_sp)
 
 # Ajustar modelo de variograma automáticamente
@@ -125,7 +149,6 @@ kriging_result <- krige(accumulated_rain_mm ~ 1,
 kriging_sf <- st_as_sf(kriging_result)
 
 # VISUALIZACIÓN
-
 #---------------
 # Limpiar datos interpolados (remover NAs)
 kriging_sf_clean <- kriging_sf %>%
@@ -135,103 +158,85 @@ library(terra)
 library(stars)
 library(scales)
 
-# --- (si no lo tenías aún) rasterizar el kriging a la malla y enmascarar por Córdoba
+# Rasterizar el kriging a la malla y enmascarar por Córdoba
 r <- rast(
   extent = ext(as_Spatial(st_union(departamentos_utm))),
-  resolution = grid_size,                    # p.ej. 5000 m
+  resolution = grid_size,                    # p.ej. 2000 m
   crs = paste0("EPSG:", utm_crs)
+  
 )
 krig_spatvect <- vect(kriging_sf_clean)      # sf -> SpatVector
+
 r_var <- rasterize(krig_spatvect, r, field = "var1.pred", fun = mean)
+
 r_var_mask <- mask(r_var, vect(departamentos_utm))
-r_stars <- st_as_stars(r_var_mask)
+r_stars    <- st_as_stars(r_var_mask)
+
+# Extraer coordenadas de las ciudades para usar con geom_text_repel
+ciudades_coords <- ciudades_utm %>%
+  mutate(
+    x = st_coordinates(.)[,1],
+    y = st_coordinates(.)[,2]
+  ) %>%
+  st_drop_geometry()
 
 mapa_kriging_log <- ggplot() +
   geom_stars(data = r_stars) +
-  scale_fill_gradientn(
-    name   = "Precipitación\n(mm)",
-    colours = c("white", "lightblue", "blue", "darkblue", "purple", "red"),
-    values  = scales::rescale(c(0, 10, 50, 100, 150, 180, 240, 300)),
-    breaks  = c(0, 10, 25, 50, 75, 100, 150, 180, 240, 300),
+  scale_fill_stepsn(
+    name    = "\n(mm)",
+    colours = c("#b3d9ff", "#66b2ff", "#2c7fb8", "#253494", "#fdd0a2", "#fb6a4a", "#cb181d"),
+    breaks  = c(0, 10, 50, 100, 150, 180, 240, 300),  # 7 colores = breaks-1
     limits  = c(0, 300),
     labels  = scales::label_number(accuracy = 1),
-    oob     = scales::squish
-  ) +
+    na.value = "white") +
   geom_sf(data = departamentos_utm, fill = NA, color = "black", linewidth = 0.4) +
+  geom_sf(data = ciudades_utm, color = "black", size = 2, shape = 19) +
+  geom_text_repel(data = ciudades_coords,
+                  aes(x = x, y = y, label = nombre),
+                  size = 3,
+                  color = "black",
+                  bg.color = "white",
+                  bg.r = 0.1,
+                  force = 2,
+                  max.overlaps = Inf,
+                  seed = 123) +
   coord_sf(crs = st_crs(utm_crs)) +
   theme_void() +
-  labs(
-    title    = "Precipitación Acumulada",
-    subtitle = paste0("Periodo de observación: ",
-                      first_reading_str, " a ", last_reading_str)) +
   theme(
-    plot.title    = element_text(hjust = 0.5, size = 14, face = "bold"),
-    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title    = element_text(hjust = 0, size = 13, face = "bold"),
+    plot.subtitle = element_text(hjust = 0, size = 13),
     legend.position = "right",
     legend.title    = element_text(size = 12, face = "bold"),
-    legend.text     = element_text(size = 11)
+    legend.text     = element_text(size = 11),
+    plot.margin = margin(20, 20, 20, 20)
   ) +
+  labs(
+    title    = "Precipitación Acumulada",
+    subtitle = paste0(first_reading_str, " a ", last_reading_str)) +
   guides(
     fill = guide_colorbar(
-      barwidth  = 1.5,   # ancho de la barra
-      barheight = 20,    # largo de la barra
+      barwidth  = 1.5,
+      barheight = 20,
       ticks     = TRUE,
       frame.colour = "black"
     )
   )
 
-print(mapa_kriging_log)
+mapa_con_logo <- mapa_kriging_log +
+  annotation_custom(
+    logo_grob,
+    xmin = st_bbox(departamentos_utm)[1] + 250000,   # desplaza en X
+    xmax = st_bbox(departamentos_utm)[1] + 380000,   # ancho logo
+    ymin = st_bbox(departamentos_utm)[2] + 500,   # desplaza en Y
+    ymax = st_bbox(departamentos_utm)[2] + 90000    # alto logo
+  )
+
+print(mapa_con_logo)
 
 ggsave(
-  "mapa_kriging.png",
-  plot = mapa_kriging_log,
-  width = 16, height = 9, units = "in", dpi = 600,
-  bg = "white"    # <- evita gris en el PNG
+  "mapa_final_con_logo.png",
+  plot = mapa_con_logo,
+  width = 16, height = 9, units = "in", dpi = 600, bg = "white"
 )
-
-# MAPA CON CONTORNOS (ALTERNATIVO)
-#----------------------------------
-# Crear mapa alternativo con contornos suaves
-mapa_alternativo <- ggplot() +
-  geom_sf(data = departamentos_utm, fill = "white", color = "black", linewidth = 0.5) +
-  geom_sf(data = kriging_sf_clean, 
-          aes(fill = var1.pred), 
-          color = NA) +
-  scale_fill_gradient2(name = "Precipitación\n(mm)", 
-                       low = "blue", 
-                       mid = "yellow", 
-                       high = "red",
-                       midpoint = median(kriging_sf_clean$var1.pred, na.rm = TRUE),
-                       na.value = "transparent") +
-  geom_sf(data = df_Acumulados_utm, 
-          color = "black", 
-          size = 2, 
-          alpha = 0.8,
-          shape = 21,
-          fill = "white",
-          stroke = 1) +
-  labs(title = "Mapa de Precipitación con Estaciones",
-       subtitle = "Interpolación Kriging - Córdoba") +
-  theme_void() +
-  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5, size = 12),
-        legend.position = "bottom")
-
-print(mapa_alternativo)
-
-# MAPA CON CONTORNOS
-#-------------------
-# Crear isolíneas
-iso_lines <- st_contour(kriging_sf, contour_lines = TRUE, breaks = 10)
-
-mapa_contornos <- mapa_base +
-  geom_sf(data = kriging_sf, aes(fill = var1.pred), color = NA) +
-  geom_sf(data = iso_lines, color = "white", alpha = 0.7, size = 0.3) +
-  scale_fill_viridis_c(name = "Precipitación\n(mm)", 
-                       option = "plasma") +
-  geom_sf(data = df_Acumulados_utm, 
-          color = "red", 
-          size = 1.5, 
-          alpha = 0.8)
-
-print(mapa_contornos)
