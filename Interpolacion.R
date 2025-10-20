@@ -15,17 +15,12 @@ library(jpeg)
 library(grid)# Para agregar logo
 
 # Cargar datos
-df <- read_csv("datos/precipitacion_acumulado_2025-09-01_21-13.csv")
+df <- read_csv("datos/precipitacion_acumulado_2025-10-05_11-38.csv")
 df_2 <- read_csv("datos/station_coordinates.csv")
 df_2 <- df_2[df_2$original_id %in% df$station_code, ]
 departamentos_sf <- st_read("SHP/departamentos.shp")
 departamentos_sf <- departamentos_sf %>%
   filter(PROVINCIA == "CORDOBA")
-
-logo <- jpeg::readJPEG("Logo_ohmc.jpg")
-
-logo_grob <- rasterGrob(logo, interpolate = TRUE)
-
 
 # Coordenadas de ciudades
 ciudades <- data.frame(
@@ -170,7 +165,11 @@ krig_spatvect <- vect(kriging_sf_clean)      # sf -> SpatVector
 r_var <- rasterize(krig_spatvect, r, field = "var1.pred", fun = mean)
 
 r_var_mask <- mask(r_var, vect(departamentos_utm))
-r_stars    <- st_as_stars(r_var_mask)
+
+# Dejar valores <0.1 como NA para pintarlos en blanco
+r_var_mask[r_var_mask < 0.1] <- NA
+
+r_stars <- st_as_stars(r_var_mask)
 
 # Extraer coordenadas de las ciudades para usar con geom_text_repel
 ciudades_coords <- ciudades_utm %>%
@@ -184,59 +183,71 @@ mapa_kriging_log <- ggplot() +
   geom_stars(data = r_stars) +
   scale_fill_stepsn(
     name    = "\n(mm)",
-    colours = c("#b3d9ff", "#66b2ff", "#2c7fb8", "#253494", "#fdd0a2", "#fb6a4a", "#cb181d"),
-    breaks  = c(0, 10, 50, 100, 150, 180, 240, 300),  # 7 colores = breaks-1
-    limits  = c(0, 300),
+    colours = c(
+      "#c7e3ff", "#417eba", "#3e4887", "#253494",
+      "#fdd0a2", "#fcae91", "#fb6a4a"
+    ),
+    breaks  = c(0.1,5,15,30,50,80,120), # arranca en 0.1
+    limits  = c(0,120),
     labels  = scales::label_number(accuracy = 1),
-    na.value = "white") +
+    na.value = "white",
+    oob = scales::squish
+  ) +
   geom_sf(data = departamentos_utm, fill = NA, color = "black", linewidth = 0.4) +
   geom_sf(data = ciudades_utm, color = "black", size = 2, shape = 19) +
-  geom_text_repel(data = ciudades_coords,
-                  aes(x = x, y = y, label = nombre),
-                  size = 3,
-                  color = "black",
-                  bg.color = "white",
-                  bg.r = 0.1,
-                  force = 2,
-                  max.overlaps = Inf,
-                  seed = 123) +
+  geom_text_repel(
+    data = ciudades_coords,
+    aes(x = x, y = y, label = nombre),
+    size = 3, color = "black",
+    bg.color = "white", bg.r = 0.1,
+    force = 2, max.overlaps = Inf, seed = 123
+  ) +
   coord_sf(crs = st_crs(utm_crs)) +
   theme_void() +
   theme(
     plot.background = element_rect(fill = "white", color = NA),
     panel.background = element_rect(fill = "white", color = NA),
-    plot.title    = element_text(hjust = 0, size = 13, face = "bold"),
-    plot.subtitle = element_text(hjust = 0, size = 13),
+    plot.title    = element_text(hjust = 0.5, size = 13, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    plot.caption  = element_text(hjust = 0.5, size = 8, colour = "grey40"), # caption pequeño
     legend.position = "right",
     legend.title    = element_text(size = 12, face = "bold"),
     legend.text     = element_text(size = 11),
-    plot.margin = margin(20, 20, 20, 20)
+    plot.margin     = margin(20, 20, 20, 20)
   ) +
   labs(
     title    = "Precipitación Acumulada",
-    subtitle = paste0(first_reading_str, " a ", last_reading_str)) +
+    subtitle = paste0(first_reading_str, " a ", last_reading_str),
+    caption  = "Fuente: Estaciones meteorológicas pertenecientes a la provincia de Córdoba 
+    Elaborado a partir del método de interpolación de Kriging"   # 👈 caption
+  ) +
   guides(
-    fill = guide_colorbar(
-      barwidth  = 1.5,
-      barheight = 20,
-      ticks     = TRUE,
-      frame.colour = "black"
+    fill = guide_legend(            # leyenda discreta con “cajitas” iguales
+      keyheight = unit(30, "pt"),
+      keywidth  = unit(16, "pt")
     )
   )
 
-mapa_con_logo <- mapa_kriging_log +
-  annotation_custom(
-    logo_grob,
-    xmin = st_bbox(departamentos_utm)[1] + 250000,   # desplaza en X
-    xmax = st_bbox(departamentos_utm)[1] + 380000,   # ancho logo
-    ymin = st_bbox(departamentos_utm)[2] + 500,   # desplaza en Y
-    ymax = st_bbox(departamentos_utm)[2] + 90000    # alto logo
+print(mapa_kriging_log)
+
+mapa_con_watermark <- mapa_kriging_log +
+  annotate(
+    "text",
+    x = mean(st_bbox(departamentos_utm)[c("xmin","xmax")]),  # centro en X
+    y = mean(st_bbox(departamentos_utm)[c("ymin","ymax")]),  # centro en Y
+    label = "OHMC",              # 🔹 tu marca
+    color = "grey70",            # color
+    alpha = 0.3,                 # transparencia
+    angle = 45,                  # inclinación
+    size = 30,                   # tamaño (ajustá a gusto)
+    fontface = "bold"
   )
 
-print(mapa_con_logo)
+print(mapa_con_watermark)
+
 
 ggsave(
-  "mapa_final_con_logo.png",
-  plot = mapa_con_logo,
+  "Interpolacion_10_05.png",
+  plot = mapa_con_watermark,
   width = 16, height = 9, units = "in", dpi = 600, bg = "white"
 )
